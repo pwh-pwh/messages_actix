@@ -1,11 +1,11 @@
+use actix_web::error::{InternalError, JsonPayloadError};
 use actix_web::middleware::Logger;
 use actix_web::web::Data;
-use actix_web::{get, post, web, App, HttpServer, Responder, HttpRequest, HttpResponse};
+use actix_web::{get, post, web, App, HttpRequest, HttpResponse, HttpServer, Responder};
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use actix_web::error::{InternalError, JsonPayloadError};
 
 static SERVER_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -41,22 +41,29 @@ struct PostResponse {
 }
 
 #[derive(Serialize)]
+struct LookupResponse {
+    server_id: usize,
+    request_count: usize,
+    result: Option<String>,
+}
+
+#[derive(Serialize)]
 struct PostError {
     server_id: usize,
     request_count: usize,
-    error:String
+    error: String,
 }
 
-fn post_error(err: JsonPayloadError,req: &HttpRequest) ->actix_web::Error {
+fn post_error(err: JsonPayloadError, req: &HttpRequest) -> actix_web::Error {
     let state = req.app_data::<Data<AppState>>().unwrap();
     let request_count = state.request_count.get() + 1;
     state.request_count.set(request_count);
     let post_error = PostError {
         server_id: state.server_id,
         request_count,
-        error: format!("{}",err)
+        error: format!("{}", err),
     };
-    InternalError::from_response(err,HttpResponse::BadRequest().json(post_error)).into()
+    InternalError::from_response(err, HttpResponse::BadRequest().json(post_error)).into()
 }
 
 #[get("/")]
@@ -99,6 +106,20 @@ async fn clear(state: web::Data<AppState>) -> std::io::Result<impl Responder> {
     }))
 }
 
+#[get("/lookup/{index}")]
+async fn lookup(state: Data<AppState>, idx: web::Path<usize>) -> std::io::Result<impl Responder> {
+    let request_count = state.request_count.get() + 1;
+    state.request_count.set(request_count);
+    let ms = state.messages.lock().unwrap();
+    let id = idx.into_inner();
+    let result = ms.get(id).cloned();
+    Ok(web::Json(LookupResponse {
+        server_id: SERVER_COUNTER.load(Ordering::SeqCst),
+        request_count: 0,
+        result,
+    }))
+}
+
 impl MessageApp {
     pub fn new(port: u16) -> Self {
         Self { port }
@@ -117,10 +138,15 @@ impl MessageApp {
                 .service(index)
                 .service(
                     web::resource("/send")
-                        .app_data(web::JsonConfig::default().limit(4096).error_handler(post_error))
+                        .app_data(
+                            web::JsonConfig::default()
+                                .limit(4096)
+                                .error_handler(post_error),
+                        )
                         .route(web::post().to(post)),
                 )
                 .service(clear)
+                .service(lookup)
         })
         .bind(("127.0.0.1", self.port))?
         .workers(4)
