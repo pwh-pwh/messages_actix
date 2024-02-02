@@ -1,12 +1,15 @@
 use actix_web::middleware::Logger;
 use actix_web::web::Data;
-use actix_web::{get, post, web, App, HttpServer, Responder};
+use actix_web::{get, post, web, App, HttpServer, Responder, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use actix_web::error::{InternalError, JsonPayloadError};
 
 static SERVER_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+const LOG_FORMAT: &str = r#""%r" %s %b "%{User-Agent}i" %D"#;
 
 pub struct MessageApp {
     port: u16,
@@ -35,6 +38,25 @@ struct PostResponse {
     server_id: usize,
     request_count: usize,
     message: String,
+}
+
+#[derive(Serialize)]
+struct PostError {
+    server_id: usize,
+    request_count: usize,
+    error:String
+}
+
+fn post_error(err: JsonPayloadError,req: &HttpRequest) ->actix_web::Error {
+    let state = req.app_data::<Data<AppState>>().unwrap();
+    let request_count = state.request_count.get() + 1;
+    state.request_count.set(request_count);
+    let post_error = PostError {
+        server_id: state.server_id,
+        request_count,
+        error: format!("{}",err)
+    };
+    InternalError::from_response(err,HttpResponse::BadRequest().json(post_error)).into()
 }
 
 #[get("/")]
@@ -91,11 +113,11 @@ impl MessageApp {
                     request_count: Cell::new(0),
                     messages: messages.clone(),
                 }))
-                .wrap(Logger::default())
+                .wrap(Logger::new(LOG_FORMAT))
                 .service(index)
                 .service(
                     web::resource("/send")
-                        .app_data(web::JsonConfig::default().limit(4096))
+                        .app_data(web::JsonConfig::default().limit(4096).error_handler(post_error))
                         .route(web::post().to(post)),
                 )
                 .service(clear)
